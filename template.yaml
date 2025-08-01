@@ -1,0 +1,374 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  VITAS FHIR Serverless Infrastructure
+
+  SAM Template for FHIR R4 compliant API with Lambda functions,
+  DynamoDB storage, and S3 document management.
+
+# Global configuration for all functions
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: nodejs20.x
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        NODE_ENV: !Ref Environment
+        FHIR_TABLE_NAME: !Ref FHIRResourcesTable
+        DOCUMENTS_BUCKET: !Ref DocumentsBucket
+        LEGACY_PATIENTS_TABLE: !Ref ExistingPatientsTable
+        LEGACY_APPOINTMENTS_TABLE: !Ref ExistingAppointmentsTable
+        LEGACY_DOCTORS_TABLE: !Ref ExistingDoctorsTable
+        LEGACY_DIAGNOSIS_TABLE: !Ref ExistingDiagnosisTable
+        LOG_LEVEL: INFO
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name for resource naming
+
+  VitasLegacyApiUrl:
+    Type: String
+    Description: URL of the existing Vitas API for legacy integration
+    Default: ''
+
+  ExistingPatientsTable:
+    Type: String
+    Description: Name of existing patients DynamoDB table
+    Default: 'Patients_Table'
+
+  ExistingAppointmentsTable:
+    Type: String
+    Description: Name of existing appointments DynamoDB table
+    Default: 'Appointments_Table'
+
+  ExistingDoctorsTable:
+    Type: String
+    Description: Name of existing doctors DynamoDB table
+    Default: 'Doctors_Table'
+
+  ExistingDiagnosisTable:
+    Type: String
+    Description: Name of existing diagnosis DynamoDB table
+    Default: 'Diagnosis_table'
+
+Resources:
+  # API Gateway for FHIR R4 endpoints
+  FHIRApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub 'vitas-fhir-api-${Environment}'
+      StageName: !Ref Environment
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'*'"
+
+  # Lambda Authorizer Function (Basic - No Cognito)
+  AuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'vitas-fhir-authorizer-${Environment}'
+      CodeUri: src/authorizer/
+      Handler: index.handler
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - index.ts
+
+  # FHIR Resource Manager Function
+  FHIRResourceManagerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'vitas-fhir-resource-manager-${Environment}'
+      CodeUri: src/fhir-resource-manager/
+      Handler: index.handler
+      Timeout: 60
+      Events:
+        PatientGet:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FHIRApi
+            Path: /fhir/Patient
+            Method: get
+        PatientPost:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FHIRApi
+            Path: /fhir/Patient
+            Method: post
+        PatientGetById:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FHIRApi
+            Path: /fhir/Patient/{id}
+            Method: get
+        PatientPut:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FHIRApi
+            Path: /fhir/Patient/{id}
+            Method: put
+        EncounterGet:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FHIRApi
+            Path: /fhir/Encounter
+            Method: get
+        EncounterPost:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FHIRApi
+            Path: /fhir/Encounter
+            Method: post
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FHIRResourcesTable
+        - S3ReadPolicy:
+            BucketName: !Ref DocumentsBucket
+        - S3WritePolicy:
+            BucketName: !Ref DocumentsBucket
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Query
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+              Resource:
+                - !GetAtt FHIRResourcesTable.Arn
+                - !Sub '${FHIRResourcesTable.Arn}/index/*'
+            - Effect: Allow
+              Action:
+                - dynamodb:Query
+                - dynamodb:GetItem
+                - dynamodb:Scan
+              Resource:
+                - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ExistingPatientsTable}'
+                - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ExistingPatientsTable}/index/*'
+                - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ExistingAppointmentsTable}'
+                - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ExistingAppointmentsTable}/index/*'
+                - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ExistingDoctorsTable}'
+                - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ExistingDoctorsTable}/index/*'
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - index.ts
+
+  # HL7 Message Processor Function
+  HL7MessageProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'vitas-hl7-processor-${Environment}'
+      CodeUri: src/hl7-message-processor/
+      Handler: index.handler
+      Events:
+        HL7MessageApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FHIRApi
+            Path: /hl7/message
+            Method: post
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FHIRResourcesTable
+        - LambdaInvokePolicy:
+            FunctionName: !Ref FHIRTranslatorFunction
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - index.ts
+
+  # FHIR Translator Function
+  FHIRTranslatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'vitas-fhir-translator-${Environment}'
+      CodeUri: src/fhir-translator/
+      Handler: index.handler
+      Events:
+        TranslateApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FHIRApi
+            Path: /fhir/translate
+            Method: post
+      Environment:
+        Variables:
+          LEGACY_API_URL: !Ref VitasLegacyApiUrl
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - index.ts
+
+  # DynamoDB Table for FHIR Resources
+  FHIRResourcesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'vitas-fhir-resources-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+        - AttributeName: GSI2PK
+          AttributeType: S
+        - AttributeName: GSI2SK
+          AttributeType: S
+        - AttributeName: resourceType
+          AttributeType: S
+        - AttributeName: lastUpdated
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: GSI2
+          KeySchema:
+            - AttributeName: GSI2PK
+              KeyType: HASH
+            - AttributeName: GSI2SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: ResourceTypeIndex
+          KeySchema:
+            - AttributeName: resourceType
+              KeyType: HASH
+            - AttributeName: lastUpdated
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: VITAS-FHIR
+
+  # S3 Bucket for Documents and Attachments
+  DocumentsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'vitas-fhir-documents-${Environment}-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToIA
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+          - Id: TransitionToGlacier
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: GLACIER
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: VITAS-FHIR
+
+  # CloudWatch Log Groups
+  FHIRResourceManagerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/vitas-fhir-resource-manager-${Environment}'
+      RetentionInDays: 14
+
+  HL7ProcessorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/vitas-hl7-processor-${Environment}'
+      RetentionInDays: 14
+
+  TranslatorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/vitas-fhir-translator-${Environment}'
+      RetentionInDays: 14
+
+Outputs:
+  FHIRApiUrl:
+    Description: 'API Gateway endpoint URL for FHIR API'
+    Value: !Sub 'https://${FHIRApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub '${AWS::StackName}-FHIRApiUrl'
+
+  FHIRResourcesTableName:
+    Description: 'DynamoDB table name for FHIR resources'
+    Value: !Ref FHIRResourcesTable
+    Export:
+      Name: !Sub '${AWS::StackName}-FHIRResourcesTable'
+
+  DocumentsBucketName:
+    Description: 'S3 bucket name for documents'
+    Value: !Ref DocumentsBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-DocumentsBucket'
+
+  FHIRResourceManagerFunctionArn:
+    Description: 'FHIR Resource Manager Lambda Function ARN'
+    Value: !GetAtt FHIRResourceManagerFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-FHIRResourceManagerFunction'
+
+  HL7MessageProcessorFunctionArn:
+    Description: 'HL7 Message Processor Lambda Function ARN'
+    Value: !GetAtt HL7MessageProcessorFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-HL7MessageProcessorFunction'

@@ -1,0 +1,65 @@
+# More information about the configuration file can be found here:
+# https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-sam-cli-config.html
+version = 0.1
+
+# Default configuration
+[default.global.parameters]
+stack_name = "vitas-fhir-dev"
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.validate.parameters]
+lint = true
+
+[default.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+resolve_s3 = true
+parameter_overrides = "Environment=dev"
+
+[default.package.parameters]
+resolve_s3 = true
+
+[default.sync.parameters]
+watch = true
+
+[default.local_start_api.parameters]
+warm_containers = "EAGER"
+
+[default.local_start_lambda.parameters]
+warm_containers = "EAGER"
+
+# Development environment
+[dev.global.parameters]
+stack_name = "vitas-fhir-dev"
+
+[dev.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+resolve_s3 = true
+parameter_overrides = "Environment=dev"
+tags = "Environment=dev Application=VITAS-FHIR"
+
+# Staging environment
+[staging.global.parameters]
+stack_name = "vitas-fhir-staging"
+
+[staging.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+resolve_s3 = true
+parameter_overrides = "Environment=staging"
+tags = "Environment=staging Application=VITAS-FHIR"
+
+# Production environment
+[prod.global.parameters]
+stack_name = "vitas-fhir-prod"
+
+[prod.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+resolve_s3 = true
+parameter_overrides = "Environment=prod"
+tags = "Environment=prod Application=VITAS-FHIR"
